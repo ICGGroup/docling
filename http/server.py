@@ -6,18 +6,37 @@ multipart form data with file attachments and converts each file using Docling.
 
 import json
 import logging
+import os
+import sys
 import tempfile
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
+
+# Add parent directory to path to use local docling module
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, HTMLResponse, Response
 from pydantic import BaseModel, Field
 
-from docling.document_converter import DocumentConverter
-from docling_core.types.doc import ImageRefMode
+from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
+from docling.datamodel.base_models import InputFormat
+from docling.document_converter import (
+    DocumentConverter,
+    PdfFormatOption,
+    WordFormatOption,
+)
+from docling.pipeline.simple_pipeline import SimplePipeline
+from docling.pipeline.standard_pdf_pipeline import StandardPdfPipeline
+
+from docling.datamodel.pipeline_options import (
+    PdfPipelineOptions,
+    TableStructureOptions,
+    TesseractCliOcrOptions,
+    AwsTextractOcrOptions
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -259,9 +278,46 @@ async def convert_documents(
         if not file_paths:
             raise HTTPException(status_code=400, detail="No valid files provided")
 
+        
         # Initialize DocumentConverter
-        # For now, use defaults. Options can be applied here in the future.
-        doc_converter = DocumentConverter()
+        # Create pipeline options with AWS Textract OCR configuration
+        pdf_pipeline_options = PdfPipelineOptions(
+            do_ocr=False,
+            do_table_structure=True,
+            table_structure_options=TableStructureOptions(
+                do_cell_matching=True
+            ),
+            ocr_options=AwsTextractOcrOptions(
+                force_full_page_ocr=True,
+                region_name=os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION"),
+            )
+        )
+
+        doc_converter = DocumentConverter(  # all of the below is optional, has internal defaults.
+            allowed_formats=[
+                InputFormat.PDF,
+                InputFormat.IMAGE,
+                InputFormat.DOCX,
+                InputFormat.HTML,
+                InputFormat.PPTX,
+                InputFormat.ASCIIDOC,
+                InputFormat.CSV,
+                InputFormat.MD,
+                InputFormat.XLSX,
+            ],  # whitelist formats, non-matching files are ignored.
+            format_options={
+                InputFormat.PDF: PdfFormatOption(
+                    pipeline_cls=StandardPdfPipeline,
+                    backend=PyPdfiumDocumentBackend,
+                    pipeline_options=pdf_pipeline_options,
+                ),
+                InputFormat.DOCX: WordFormatOption(
+                    pipeline_cls=SimplePipeline  # or set a backend, e.g., MsWordDocumentBackend
+                    # If you change the backend, remember to import it, e.g.:
+                    #   from docling.backend.msword_backend import MsWordDocumentBackend
+                ),
+            },
+        )
 
         # Convert all files
         results = []

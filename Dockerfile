@@ -11,6 +11,7 @@ RUN apt-get update \
 # For more details in the different torch distribution visit https://pytorch.org/.
 
 RUN pip install --no-cache-dir docling fastapi uvicorn[standard] python-multipart --extra-index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir fastapi uvicorn[standard] python-multipart rapidocr onnxruntime
 
 ENV HF_HOME=/tmp/
 ENV TORCH_HOME=/tmp/
