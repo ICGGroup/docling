@@ -212,7 +212,8 @@ NOTE: When using non-JSON output formats, the `saved_files` information is not i
 [source,bash]
 ----
 # From the repository root
-docker build -t docling-lambda -f lambda/Dockerfile .
+# Use --platform linux/amd64 for Lambda compatibility (required on Apple Silicon Macs)
+docker build --platform linux/amd64 -t docling-lambda -f lambda/Dockerfile .
 ----
 
 === Running Locally
@@ -477,6 +478,192 @@ For AWS Textract OCR support, add:
 |Alternative region variable
 |===
 
+=== Deploying to AWS Lambda via ECR
+
+==== Prerequisites
+
+* AWS CLI configured with appropriate credentials
+* Docker installed and running
+* An ECR repository created for the Lambda image
+
+==== Step 1: Create ECR Repository (if not exists)
+
+[source,bash]
+----
+# Set variables
+AWS_REGION=us-west-2
+AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+ECR_REPO_NAME=docling-lambda
+
+# Create the repository
+aws ecr create-repository \
+    --repository-name $ECR_REPO_NAME \
+    --region $AWS_REGION \
+    --image-scanning-configuration scanOnPush=true
+----
+
+==== Step 2: Build and Push Docker Image
+
+[source,bash]
+----
+# Set variables
+AWS_REGION=us-west-2
+AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+ECR_REPO_NAME=docling-lambda
+IMAGE_TAG=latest
+
+# Authenticate Docker to ECR
+aws ecr get-login-password --region $AWS_REGION | \
+    docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+
+# Build the image (from repository root)
+# Use --platform linux/amd64 to ensure compatibility with Lambda (required on Apple Silicon Macs)
+docker build --platform linux/amd64 -t $ECR_REPO_NAME:$IMAGE_TAG -f lambda/Dockerfile .
+
+# Tag for ECR
+docker tag $ECR_REPO_NAME:$IMAGE_TAG \
+    $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO_NAME:$IMAGE_TAG
+
+# Push to ECR
+docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO_NAME:$IMAGE_TAG
+----
+
+==== Step 3: Create IAM Role for Lambda
+
+[source,bash]
+----
+# Create the trust policy
+cat > trust-policy.json << 'EOF'
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Principal": {
+                "Service": "lambda.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
+        }
+    ]
+}
+EOF
+
+# Create the role
+aws iam create-role \
+    --role-name docling-lambda-role \
+    --assume-role-policy-document file://trust-policy.json
+
+# Attach basic Lambda execution policy
+aws iam attach-role-policy \
+    --role-name docling-lambda-role \
+    --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+# Create and attach S3 access policy
+cat > s3-policy.json << 'EOF'
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetObject",
+                "s3:HeadObject",
+                "s3:PutObject"
+            ],
+            "Resource": [
+                "arn:aws:s3:::*/*"
+            ]
+        }
+    ]
+}
+EOF
+
+aws iam put-role-policy \
+    --role-name docling-lambda-role \
+    --policy-name S3AccessPolicy \
+    --policy-document file://s3-policy.json
+
+# Clean up temp files
+rm trust-policy.json s3-policy.json
+----
+
+==== Step 4: Create Lambda Function
+
+[source,bash]
+----
+# Set variables
+AWS_REGION=us-west-2
+AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+ECR_REPO_NAME=docling-lambda
+IMAGE_TAG=latest
+FUNCTION_NAME=icg-document-enrichmen
+
+# Create the Lambda function
+aws lambda create-function \
+    --function-name $FUNCTION_NAME \
+    --package-type Image \
+    --code ImageUri=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO_NAME:$IMAGE_TAG \
+    --role arn:aws:iam::$AWS_ACCOUNT_ID:role/docling-lambda-role \
+    --timeout 300 \
+    --memory-size 3008 \
+    --region $AWS_REGION \
+    --architectures x86_64
+----
+
+==== Step 5: Update Lambda Function (for subsequent deployments)
+
+[source,bash]
+----
+# Set variables
+AWS_REGION=us-west-2
+AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+ECR_REPO_NAME=docling-lambda
+IMAGE_TAG=latest
+FUNCTION_NAME=icg-document-enrichmen
+
+# Update the function code
+aws lambda update-function-code \
+    --function-name $FUNCTION_NAME \
+    --image-uri $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO_NAME:$IMAGE_TAG \
+    --region $AWS_REGION
+----
+
+==== Quick Deploy Script
+
+Create a script `deploy.sh` in the `lambda/` directory for quick deployments:
+
+[source,bash]
+----
+#!/bin/bash
+set -e
+
+AWS_REGION=${AWS_REGION:-us-west-2}
+AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+ECR_REPO_NAME=${ECR_REPO_NAME:-docling-lambda}
+IMAGE_TAG=${IMAGE_TAG:-latest}
+FUNCTION_NAME=${FUNCTION_NAME:-icg-document-enrichmen}
+
+echo "Building Docker image..."
+docker build --platform linux/amd64 -t $ECR_REPO_NAME:$IMAGE_TAG -f lambda/Dockerfile .
+
+echo "Authenticating to ECR..."
+aws ecr get-login-password --region $AWS_REGION | \
+    docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+
+echo "Tagging and pushing image..."
+docker tag $ECR_REPO_NAME:$IMAGE_TAG \
+    $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO_NAME:$IMAGE_TAG
+docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO_NAME:$IMAGE_TAG
+
+echo "Updating Lambda function..."
+aws lambda update-function-code \
+    --function-name $FUNCTION_NAME \
+    --image-uri $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO_NAME:$IMAGE_TAG \
+    --region $AWS_REGION
+
+echo "Deployment complete!"
+----
+
 === Invoking the Deployed Lambda
 
 ==== AWS CLI
@@ -485,7 +672,7 @@ For AWS Textract OCR support, add:
 ----
 # Synchronous invocation
 aws lambda invoke \
-    --function-name docling-converter \
+    --function-name icg-document-enrichmen \
     --payload '{
         "files": [
             {
@@ -507,7 +694,7 @@ cat response.json | jq .
 [source,bash]
 ----
 aws lambda invoke \
-    --function-name docling-converter \
+    --function-name icg-document-enrichmen \
     --payload '{
         "files": [{"bucket": "my-bucket", "key": "report.pdf"}],
         "output_format": "markdown"
@@ -516,6 +703,61 @@ aws lambda invoke \
     response.txt
 
 cat response.txt
+----
+
+==== AWS CLI with OCR Enabled
+
+[source,bash]
+----
+# With RapidOCR
+aws lambda invoke \
+    --function-name icg-document-enrichmen \
+    --payload '{
+        "files": [{"bucket": "my-bucket", "key": "scanned-doc.pdf"}],
+        "output_format": "json",
+        "options": {
+            "ocr": {
+                "engine": "rapidocr",
+                "lang": ["english", "chinese"]
+            }
+        }
+    }' \
+    --cli-binary-format raw-in-base64-out \
+    response.json
+
+# With AWS Textract
+aws lambda invoke \
+    --function-name icg-document-enrichmen \
+    --payload '{
+        "files": [{"bucket": "my-bucket", "key": "scanned-doc.pdf"}],
+        "output_format": "json",
+        "options": {
+            "ocr": {
+                "engine": "textract",
+                "force_full_page_ocr": true
+            }
+        }
+    }' \
+    --cli-binary-format raw-in-base64-out \
+    response.json
+----
+
+==== AWS CLI with Additional Formats Saved to S3
+
+[source,bash]
+----
+aws lambda invoke \
+    --function-name icg-document-enrichmen \
+    --payload '{
+        "files": [{"bucket": "my-bucket", "key": "document.pdf"}],
+        "output_format": "json",
+        "additional_formats": ["markdown", "html", "text"]
+    }' \
+    --cli-binary-format raw-in-base64-out \
+    response.json
+
+# The response will include saved_files with S3 URIs
+cat response.json | jq '.[0].saved_files'
 ----
 
 ==== Python (boto3)
@@ -538,7 +780,7 @@ payload = {
 }
 
 response = lambda_client.invoke(
-    FunctionName='docling-converter',
+    FunctionName='icg-document-enrichmen',
     InvocationType='RequestResponse',
     Payload=json.dumps(payload)
 )
