@@ -186,8 +186,10 @@ class EasyOcrOptions(OcrOptions):
 class AwsTextractOcrOptions(OcrOptions):
     """Options for the AWS Textract OCR engine."""
 
-    kind: ClassVar[Literal["aws_textract"]] = "aws_textract"
+    kind: ClassVar[Literal["textract"]] = "textract"
     lang: List[str] = []  # AWS Textract auto-detects language, lang parameter not used
+
+
 
     # AWS credentials - if not provided, boto3 will use default credential chain
     aws_access_key_id: Optional[str] = None
@@ -198,6 +200,8 @@ class AwsTextractOcrOptions(OcrOptions):
 
     # OCR processing options
     confidence_threshold: Optional[float] = None  # Filter results by confidence (0.0-1.0)
+
+    
 
     model_config = ConfigDict(
         extra="forbid",

@@ -1,0 +1,648 @@
+= Docling Lambda Handler
+:toc:
+:toc-placement!:
+
+AWS Lambda handler for document conversion using Docling.
+
+toc::[]
+
+== Overview
+
+This Lambda function converts documents stored in S3 using the same Docling conversion logic as the HTTP server. It supports multiple input formats (PDF, DOCX, images, etc.) and multiple output formats (JSON, Markdown, HTML, YAML, text, doctags).
+
+== Request Format
+
+[source,json]
+----
+{
+    "files": [
+        {
+            "region": "us-east-1",
+            "bucket": "my-bucket",
+            "key": "documents/file.pdf"
+        }
+    ],
+    "output_format": "json",
+    "additional_formats": ["markdown", "html"],
+    "options": {
+        "ocr": {
+            "engine": "rapidocr",
+            "force_full_page_ocr": false
+        }
+    }
+}
+----
+
+=== Fields
+
+[cols="1,1,1,3"]
+|===
+|Field |Type |Required |Description
+
+|`files`
+|array
+|Yes
+|Array of S3 file references to convert (max 10 files)
+
+|`files[].region`
+|string
+|No
+|AWS region for the S3 bucket. Defaults to Lambda's region.
+
+|`files[].bucket`
+|string
+|Yes
+|S3 bucket name
+
+|`files[].key`
+|string
+|Yes
+|S3 object key (path to the file)
+
+|`output_format`
+|string
+|No
+|Output format for the response: `json` (default), `markdown`, `html`, `yaml`, `text`, `doctags`
+
+|`additional_formats`
+|array
+|No
+|Additional formats to save back to S3. Each format is saved with the original key plus extension (e.g., `doc.pdf.md`).
+
+|`options`
+|object
+|No
+|Conversion options (see <<OCR Options>> below)
+|===
+
+=== OCR Options
+
+The `options.ocr` object controls OCR behavior. By default, OCR is disabled. To enable OCR, specify an engine:
+
+[source,json]
+----
+{
+    "options": {
+        "ocr": {
+            "engine": "rapidocr",
+            "force_full_page_ocr": false,
+            "bitmap_area_threshold": 0.05,
+            "lang": ["english", "chinese"]
+        }
+    }
+}
+----
+
+[cols="1,1,1,3"]
+|===
+|Field |Type |Default |Description
+
+|`engine`
+|string
+|`none`
+|OCR engine to use: `none` (default), `rapidocr`, `easyocr`, `tesseract`, `tesseract_cli`, `textract`, `ocrmac`
+
+|`force_full_page_ocr`
+|boolean
+|`false`
+|If true, OCR is applied to the entire page regardless of detected text
+
+|`bitmap_area_threshold`
+|float
+|`0.05`
+|Percentage of page area (0.0-1.0) for a bitmap to trigger OCR processing
+
+|`lang`
+|array
+|varies
+|List of languages for OCR. Format depends on the engine.
+
+|`aws_region`
+|string
+|env default
+|AWS region for Textract (only for `aws_textract` engine)
+
+|`use_gpu`
+|boolean
+|null
+|Enable GPU acceleration (only for `easyocr` engine)
+
+|`tesseract_cmd`
+|string
+|null
+|Path to tesseract executable (only for `tesseract_cli` engine)
+
+|`tesseract_psm`
+|integer
+|null
+|Tesseract Page Segmentation Mode 0-13 (for `tesseract` and `tesseract_cli` engines)
+|===
+
+==== OCR Engine Options
+
+[cols="1,3,2"]
+|===
+|Engine |Description |Default Languages
+
+|`none`
+|Disable OCR entirely
+|N/A
+
+|`rapidocr`
+|Fast, lightweight OCR (recommended)
+|`["english", "chinese"]`
+
+|`easyocr`
+|GPU-accelerated, many languages
+|`["fr", "de", "es", "en"]`
+
+|`tesseract`
+|Tesseract via tesserocr library
+|`["fra", "deu", "spa", "eng"]`
+
+|`tesseract_cli`
+|Tesseract via command line
+|`["fra", "deu", "spa", "eng"]`
+
+|`textract`
+|AWS Textract (cloud-based, auto-detects language)
+|Auto-detected
+
+|`ocrmac`
+|macOS native OCR (macOS only)
+|`["fr-FR", "de-DE", "es-ES", "en-US"]`
+|===
+
+== Response Format
+
+=== JSON Output (default)
+
+Returns an array of conversion results:
+
+[source,json]
+----
+[
+    {
+        "filename": "document.pdf",
+        "status": "success",
+        "document": { ... },
+        "errors": [],
+        "output": null,
+        "output_format": "json",
+        "saved_files": {
+            "markdown": "s3://my-bucket/documents/file.pdf.md",
+            "html": "s3://my-bucket/documents/file.pdf.html"
+        }
+    }
+]
+----
+
+The `saved_files` field is only present when `additional_formats` was specified in the request, and contains a mapping of format names to S3 URIs where the converted files were saved.
+
+=== Non-JSON Output
+
+For other formats (`markdown`, `html`, `yaml`, `text`, `doctags`), returns the converted content directly as a string with the appropriate `Content-Type` header.
+
+NOTE: When using non-JSON output formats, the `saved_files` information is not included in the response body. Use JSON output format if you need to know where additional formats were saved.
+
+== Local Development with Docker
+
+=== Building the Container
+
+[source,bash]
+----
+# From the repository root
+docker build -t docling-lambda -f lambda/Dockerfile .
+----
+
+=== Running Locally
+
+[source,bash]
+----
+# Run the Lambda container locally
+docker run --rm -p 9000:8080 \
+    -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID \
+    -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
+    -e AWS_REGION=us-west-2 \
+    docling-lambda
+----
+
+=== Local Invocation Examples
+
+==== Single File (JSON output)
+
+[source,bash]
+----
+curl -X POST "http://localhost:9000/2015-03-31/functions/function/invocations" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "files": [
+            {
+                "bucket": "heniff-ai-document-engine",
+                "key": "0a0aa484e27c8bfad9d305b7e9b38d421158e418c386074eab6c24efdd57f0b0/raw"
+            }
+        ]
+    }'
+----
+
+==== Multiple Files
+
+[source,bash]
+----
+curl -X POST "http://localhost:9000/2015-03-31/functions/function/invocations" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "files": [
+            {
+                "bucket": "my-documents-bucket",
+                "key": "contracts/contract-a.pdf"
+            },
+            {
+                "bucket": "my-documents-bucket",
+                "key": "contracts/contract-b.docx"
+            }
+        ],
+        "output_format": "json"
+    }'
+----
+
+==== Markdown Output
+
+[source,bash]
+----
+curl -X POST "http://localhost:9000/2015-03-31/functions/function/invocations" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "files": [
+            {
+                "bucket": "my-documents-bucket",
+                "key": "reports/annual-report.pdf"
+            }
+        ],
+        "output_format": "markdown"
+    }'
+----
+
+==== Save Additional Formats to S3
+
+Convert a document and save markdown and HTML versions back to S3:
+
+[source,bash]
+----
+curl -X POST "http://localhost:9000/2015-03-31/functions/function/invocations" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "files": [
+            {
+                "bucket": "my-documents-bucket",
+                "key": "documents/contract.pdf"
+            }
+        ],
+        "output_format": "json",
+        "additional_formats": ["markdown", "html", "text"]
+    }'
+----
+
+This will:
+
+1. Convert the document and return JSON in the response
+2. Save `documents/contract.pdf.md` (Markdown) to S3
+3. Save `documents/contract.pdf.html` (HTML) to S3
+4. Save `documents/contract.pdf.txt` (plain text) to S3
+
+The response will include `saved_files` with the S3 URIs of the saved files.
+
+==== Using AWS Textract OCR
+
+[source,bash]
+----
+curl -X POST "http://localhost:9000/2015-03-31/functions/function/invocations" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "files": [
+            {
+                "bucket": "my-documents-bucket",
+                "key": "scanned/document.pdf"
+            }
+        ],
+        "options": {
+            "ocr": {
+                "engine": "textract",
+                "force_full_page_ocr": true
+            }
+        }
+    }'
+----
+
+==== Using RapidOCR with Custom Languages
+
+[source,bash]
+----
+curl -X POST "http://localhost:9000/2015-03-31/functions/function/invocations" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "files": [
+            {
+                "bucket": "my-documents-bucket",
+                "key": "multilingual/document.pdf"
+            }
+        ],
+        "options": {
+            "ocr": {
+                "engine": "rapidocr",
+                "lang": ["english", "chinese"],
+                "bitmap_area_threshold": 0.1
+            }
+        }
+    }'
+----
+
+==== Disabling OCR
+
+[source,bash]
+----
+curl -X POST "http://localhost:9000/2015-03-31/functions/function/invocations" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "files": [
+            {
+                "bucket": "my-documents-bucket",
+                "key": "native-text/document.pdf"
+            }
+        ],
+        "options": {
+            "ocr": {
+                "engine": "none"
+            }
+        }
+    }'
+----
+
+==== Cross-Region File Access
+
+[source,bash]
+----
+curl -X POST "http://localhost:9000/2015-03-31/functions/function/invocations" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "files": [
+            {
+                "region": "us-west-2",
+                "bucket": "west-coast-bucket",
+                "key": "documents/file1.pdf"
+            },
+            {
+                "region": "eu-west-1",
+                "bucket": "europe-bucket",
+                "key": "documents/file2.pdf"
+            }
+        ]
+    }'
+----
+
+==== Using jq to Parse Response
+
+[source,bash]
+----
+# Extract just the document content
+curl -s -X POST "http://localhost:9000/2015-03-31/functions/function/invocations" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "files": [{"bucket": "my-bucket", "key": "doc.pdf"}]
+    }' | jq '.[0].document'
+
+# Check conversion status
+curl -s -X POST "http://localhost:9000/2015-03-31/functions/function/invocations" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "files": [{"bucket": "my-bucket", "key": "doc.pdf"}]
+    }' | jq '.[].status'
+----
+
+== AWS Lambda Deployment
+
+=== IAM Policy
+
+The Lambda function requires read access to the S3 buckets containing documents. If using `additional_formats`, write access is also required:
+
+[source,json]
+----
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetObject",
+                "s3:HeadObject",
+                "s3:PutObject"
+            ],
+            "Resource": [
+                "arn:aws:s3:::my-documents-bucket/*",
+                "arn:aws:s3:::other-bucket/*"
+            ]
+        }
+    ]
+}
+----
+
+NOTE: `s3:PutObject` is only required if you use the `additional_formats` feature to save converted files back to S3.
+
+For AWS Textract OCR support, add:
+
+[source,json]
+----
+{
+    "Effect": "Allow",
+    "Action": [
+        "textract:DetectDocumentText",
+        "textract:AnalyzeDocument"
+    ],
+    "Resource": "*"
+}
+----
+
+=== Environment Variables
+
+[cols="1,1,3"]
+|===
+|Variable |Required |Description
+
+|`AWS_REGION`
+|No
+|Default AWS region for S3 operations (auto-set by Lambda)
+
+|`AWS_DEFAULT_REGION`
+|No
+|Alternative region variable
+|===
+
+=== Invoking the Deployed Lambda
+
+==== AWS CLI
+
+[source,bash]
+----
+# Synchronous invocation
+aws lambda invoke \
+    --function-name docling-converter \
+    --payload '{
+        "files": [
+            {
+                "bucket": "my-documents-bucket",
+                "key": "documents/sample.pdf"
+            }
+        ],
+        "output_format": "json"
+    }' \
+    --cli-binary-format raw-in-base64-out \
+    response.json
+
+# View the response
+cat response.json | jq .
+----
+
+==== AWS CLI with Markdown Output
+
+[source,bash]
+----
+aws lambda invoke \
+    --function-name docling-converter \
+    --payload '{
+        "files": [{"bucket": "my-bucket", "key": "report.pdf"}],
+        "output_format": "markdown"
+    }' \
+    --cli-binary-format raw-in-base64-out \
+    response.txt
+
+cat response.txt
+----
+
+==== Python (boto3)
+
+[source,python]
+----
+import boto3
+import json
+
+lambda_client = boto3.client('lambda')
+
+payload = {
+    "files": [
+        {
+            "bucket": "my-documents-bucket",
+            "key": "documents/contract.pdf"
+        }
+    ],
+    "output_format": "json"
+}
+
+response = lambda_client.invoke(
+    FunctionName='docling-converter',
+    InvocationType='RequestResponse',
+    Payload=json.dumps(payload)
+)
+
+result = json.loads(response['Payload'].read())
+print(json.dumps(result, indent=2))
+----
+
+==== API Gateway Integration
+
+If the Lambda is behind API Gateway, the request body is wrapped:
+
+[source,bash]
+----
+curl -X POST "https://api-id.execute-api.us-east-1.amazonaws.com/prod/convert" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "files": [
+            {
+                "bucket": "my-documents-bucket",
+                "key": "documents/invoice.pdf"
+            }
+        ],
+        "output_format": "json"
+    }'
+----
+
+== Error Responses
+
+Errors are returned with appropriate HTTP status codes:
+
+[source,json]
+----
+{
+    "statusCode": 400,
+    "headers": {"Content-Type": "application/json"},
+    "body": "{\"error\": \"At least one file must be provided in 'files' array\"}"
+}
+----
+
+=== Common Error Codes
+
+[cols="1,3"]
+|===
+|Status Code |Description
+
+|400
+|Bad request (missing files, invalid format, file too large)
+
+|403
+|Access denied to S3 object
+
+|404
+|S3 object not found
+
+|500
+|Internal conversion error
+|===
+
+== Limits
+
+- Maximum 10 files per request
+- Maximum 100MB per file
+- Lambda timeout and memory limits apply (configure based on document complexity)
+
+== Supported Input Formats
+
+- PDF (`.pdf`)
+- Microsoft Word (`.docx`)
+- Microsoft PowerPoint (`.pptx`)
+- Microsoft Excel (`.xlsx`)
+- Images (`.png`, `.jpg`, `.jpeg`, `.tiff`, `.bmp`)
+- HTML (`.html`)
+- Markdown (`.md`)
+- AsciiDoc (`.adoc`)
+- CSV (`.csv`)
+
+== Output Formats
+
+[cols="1,1,3"]
+|===
+|Format |Content-Type |Description
+
+|`json`
+|`application/json`
+|Full document structure with normalized bounding boxes
+
+|`markdown`
+|`text/markdown`
+|Markdown representation of the document
+
+|`html`
+|`text/html`
+|HTML representation of the document
+
+|`yaml`
+|`application/x-yaml`
+|YAML representation of the document structure
+
+|`text`
+|`text/plain`
+|Plain text extraction (strict text mode)
+
+|`doctags`
+|`text/plain`
+|DocTags format representation
+|===

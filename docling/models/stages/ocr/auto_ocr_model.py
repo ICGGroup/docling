@@ -30,6 +30,7 @@ class OcrAutoModel(BaseOcrModel):
         options: OcrAutoOptions,
         accelerator_options: AcceleratorOptions,
     ):
+        print(f"=== OcrAutoModel.__init__: enabled={enabled} ===")
         super().__init__(
             enabled=enabled,
             artifacts_path=artifacts_path,
@@ -40,6 +41,7 @@ class OcrAutoModel(BaseOcrModel):
 
         self._engine: Optional[BaseOcrModel] = None
         if self.enabled:
+            print("=== OcrAutoModel: OCR is ENABLED, initializing engine ===")
             if "darwin" == sys.platform:
                 try:
                     from ocrmac import ocrmac

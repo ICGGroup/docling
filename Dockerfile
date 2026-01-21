@@ -25,7 +25,7 @@ RUN docling-tools models download
 #RUN pip install fastapi uvicorn[standard]
 #RUN pip install python-multipart
 
-COPY http /root/docling/http
+COPY rest /root/docling/rest
 COPY docling /root/docling/docling
 
 

@@ -501,6 +501,7 @@ class StandardPdfPipeline(ConvertPipeline):
 
     # ---------------------------------------------------------------- helpers
     def _make_ocr_model(self, art_path: Optional[Path]) -> Any:
+        print(f"=== _make_ocr_model: do_ocr={self.pipeline_options.do_ocr}, ocr_options={type(self.pipeline_options.ocr_options).__name__} ===")
         factory = get_ocr_factory(
             allow_external_plugins=self.pipeline_options.allow_external_plugins
         )

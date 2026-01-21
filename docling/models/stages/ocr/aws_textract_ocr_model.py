@@ -67,6 +67,7 @@ class AwsTextractOcrModel(BaseOcrModel):
 
                 self.client = boto3.client("textract", **client_kwargs)
                 _log.debug("Initialized AWS Textract client")
+                _log.info("AWS OCR engine has been initialized")
             except (BotoCoreError, ClientError) as e:
                 raise RuntimeError(
                     f"Failed to initialize AWS Textract client: {e}. "
