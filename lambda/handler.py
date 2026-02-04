@@ -76,6 +76,64 @@ class LambdaError(Exception):
         self.status_code = status_code
 
 
+def _check_existing_artifacts(
+    s3_client: Any,
+    bucket: str,
+    key: str,
+    output_format: OutputFormat,
+    additional_formats: List[OutputFormat],
+) -> tuple[bool, Optional[str], Dict[str, str]]:
+    """Check if all requested output formats already exist in S3.
+
+    Args:
+        s3_client: Boto3 S3 client
+        bucket: S3 bucket name
+        key: S3 object key (original file)
+        output_format: Primary output format
+        additional_formats: Additional formats to check
+
+    Returns:
+        Tuple of (all_exist, primary_content, existing_files_map)
+        - all_exist: True if all requested formats exist
+        - primary_content: Content of primary format if it exists, None otherwise
+        - existing_files_map: Dict mapping format name to S3 URI for existing files
+    """
+    all_formats = [output_format] + [f for f in additional_formats if f != output_format]
+    existing_files: Dict[str, str] = {}
+    primary_content: Optional[str] = None
+
+    for fmt in all_formats:
+        extension = FORMAT_EXTENSIONS.get(fmt, ".txt")
+        artifact_key = f"{key}.enriched{extension}"
+
+        try:
+            # Check if the artifact exists
+            response = s3_client.get_object(Bucket=bucket, Key=artifact_key)
+            existing_files[fmt.value] = f"s3://{bucket}/{artifact_key}"
+
+            # If this is the primary format, read its content
+            if fmt == output_format:
+                primary_content = response["Body"].read().decode("utf-8")
+                _log.info(f"Found cached primary artifact: s3://{bucket}/{artifact_key}")
+            else:
+                _log.info(f"Found cached artifact: s3://{bucket}/{artifact_key}")
+
+        except ClientError as e:
+            error_code = e.response.get("Error", {}).get("Code", "Unknown")
+            if error_code in ("404", "NoSuchKey"):
+                _log.info(f"Artifact not found: s3://{bucket}/{artifact_key}")
+                return False, None, {}
+            else:
+                # For other errors, log and continue (don't use cache)
+                _log.warning(f"Error checking artifact s3://{bucket}/{artifact_key}: {e}")
+                return False, None, {}
+
+    all_exist = len(existing_files) == len(all_formats)
+    if all_exist:
+        _log.info(f"All {len(all_formats)} requested format(s) found in cache for {key}")
+    return all_exist, primary_content, existing_files
+
+
 def _download_s3_file(
     s3_client: Any,
     region: str,
@@ -140,14 +198,14 @@ def _download_s3_file(
 
 def _parse_request(
     event: Dict[str, Any]
-) -> tuple[List[Dict[str, str]], OutputFormat, List[OutputFormat], ConversionOptions]:
+) -> tuple[List[Dict[str, str]], OutputFormat, List[OutputFormat], ConversionOptions, bool]:
     """Parse and validate the Lambda request.
 
     Args:
         event: Lambda event dictionary
 
     Returns:
-        Tuple of (files_list, output_format, additional_formats, conversion_options)
+        Tuple of (files_list, output_format, additional_formats, conversion_options, force_conversion)
 
     Raises:
         LambdaError: If request is invalid
@@ -203,6 +261,11 @@ def _parse_request(
         if fmt not in additional_formats:
             additional_formats.append(fmt)
 
+    # Parse force_conversion flag (bypasses cache check)
+    force_conversion = body.get("force_conversion", False)
+    if not isinstance(force_conversion, bool):
+        raise LambdaError("'force_conversion' must be a boolean")
+
     # Parse options
     options_dict = body.get("options", {})
     _log.info(f"Parsing options: {options_dict}")
@@ -214,7 +277,7 @@ def _parse_request(
     except Exception as e:
         raise LambdaError(f"Invalid options format: {str(e)}")
 
-    return files, output_format, additional_formats, conversion_options
+    return files, output_format, additional_formats, conversion_options, force_conversion
 
 
 def _save_format_to_s3(
@@ -369,7 +432,8 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         ],
         "output_format": "json",  // optional, defaults to "json"
         "additional_formats": ["markdown", "html"],  // optional, formats to save to S3
-        "options": {}  // optional, reserved for future use
+        "force_conversion": false,  // optional, set to true to bypass cache and reconvert
+        "options": {}  // optional, conversion options (e.g., OCR settings)
     }
 
     Response format:
@@ -391,7 +455,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     try:
         # Parse request
-        files, output_format, additional_formats, conversion_options = _parse_request(event)
+        files, output_format, additional_formats, conversion_options, force_conversion = _parse_request(event)
 
         # Log OCR configuration explicitly
         print(f"=== OCR Config: {conversion_options.ocr} ===")
@@ -426,6 +490,52 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         # Track saved files for response
         saved_files_map: Dict[str, Dict[str, str]] = {}
 
+        # Check if all requested artifacts already exist in S3
+        # (only for single file requests to keep logic simple, and skip if force_conversion)
+        if len(files) == 1 and not force_conversion:
+            file_entry = files[0]
+            region = file_entry.get("region", default_region)
+            bucket = file_entry["bucket"]
+            key = file_entry["key"]
+            s3_client = get_s3_client(region)
+
+            all_exist, primary_content, existing_files = _check_existing_artifacts(
+                s3_client, bucket, key, output_format, additional_formats
+            )
+
+            if all_exist and primary_content is not None:
+                _log.info(f"Using cached artifacts for {bucket}/{key}")
+                filename = Path(key).name
+
+                # Build response from cached content
+                if output_format == OutputFormat.JSON:
+                    # Parse the cached JSON and return it
+                    try:
+                        cached_data = json.loads(primary_content)
+                        # Wrap in the expected response format
+                        response_data = [{
+                            "filename": filename,
+                            "status": "success",
+                            "content": cached_data,
+                            "saved_files": existing_files,
+                            "cached": True,
+                        }]
+                        return {
+                            "statusCode": 200,
+                            "headers": {"Content-Type": "application/json"},
+                            "body": json.dumps(response_data),
+                        }
+                    except json.JSONDecodeError:
+                        _log.warning("Failed to parse cached JSON, will reprocess")
+                else:
+                    # For non-JSON formats, return the raw cached content
+                    content_type = FORMAT_CONTENT_TYPES.get(output_format, "text/plain")
+                    return {
+                        "statusCode": 200,
+                        "headers": {"Content-Type": content_type},
+                        "body": primary_content,
+                    }
+
         # Download files and convert
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -454,6 +564,9 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             raw_results = convert_files(file_paths, conversion_options)
 
             # Process each converted document and save additional formats
+            # Also save the primary format to S3
+            all_formats_to_save = [output_format] + [f for f in additional_formats if f != output_format]
+
             for i, result in enumerate(raw_results):
                 if i < len(file_metadata):
                     metadata = file_metadata[i]
@@ -463,7 +576,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                         s3_client,
                         metadata["bucket"],
                         metadata["key"],
-                        additional_formats,
+                        all_formats_to_save,
                     )
                     if saved_files:
                         saved_files_map[result.filename] = saved_files

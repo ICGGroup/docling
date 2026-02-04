@@ -52,26 +52,68 @@ class AwsTextractOcrModel(BaseOcrModel):
                 )
 
             # Initialize the Textract client
+            # Supports multiple authentication methods:
+            # 1. Explicit credentials via options (aws_access_key_id, aws_secret_access_key, etc.)
+            # 2. Environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
+            # 3. AWS IAM role (when running in Lambda, EC2, ECS, etc.)
+            # 4. AWS credential file (~/.aws/credentials)
+            # 5. AWS config file (~/.aws/config)
+            #
+            # When no explicit credentials are provided, boto3 automatically uses the
+            # default credential chain, which includes IAM role credentials in AWS environments.
             try:
                 client_kwargs = {}
-                if self.options.region_name:
-                    client_kwargs["region_name"] = self.options.region_name
-                if self.options.aws_access_key_id:
+
+                # Determine region: explicit option > AWS_REGION env > AWS_DEFAULT_REGION env
+                region = self.options.region_name
+                if not region:
+                    import os
+                    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+                if region:
+                    client_kwargs["region_name"] = region
+
+                # Check if explicit credentials are provided in options
+                has_explicit_creds = bool(
+                    self.options.aws_access_key_id and self.options.aws_secret_access_key
+                )
+
+                if has_explicit_creds:
+                    # Use explicitly provided credentials
                     client_kwargs["aws_access_key_id"] = self.options.aws_access_key_id
-                if self.options.aws_secret_access_key:
                     client_kwargs["aws_secret_access_key"] = self.options.aws_secret_access_key
-                if self.options.aws_session_token:
-                    client_kwargs["aws_session_token"] = self.options.aws_session_token
+                    if self.options.aws_session_token:
+                        client_kwargs["aws_session_token"] = self.options.aws_session_token
+                    _log.debug("Using explicit AWS credentials from options")
+                else:
+                    # Let boto3 use the default credential chain
+                    # This automatically handles:
+                    # - Environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
+                    # - IAM role credentials (Lambda execution role, EC2 instance role, etc.)
+                    # - AWS credential/config files
+                    _log.debug("Using boto3 default credential chain (env vars, IAM role, or config files)")
+
                 if self.options.endpoint_url:
                     client_kwargs["endpoint_url"] = self.options.endpoint_url
 
                 self.client = boto3.client("textract", **client_kwargs)
-                _log.debug("Initialized AWS Textract client")
-                _log.info("AWS OCR engine has been initialized")
+
+                # Log the credential source for debugging
+                session = boto3.Session()
+                credentials = session.get_credentials()
+                if credentials:
+                    cred_method = getattr(credentials, 'method', 'unknown')
+                    _log.info(f"AWS Textract client initialized using credential method: {cred_method}")
+                else:
+                    _log.info("AWS Textract client initialized (credential method: default chain)")
+
+                _log.info(f"AWS OCR engine initialized, region={region or 'default'}")
             except (BotoCoreError, ClientError) as e:
                 raise RuntimeError(
                     f"Failed to initialize AWS Textract client: {e}. "
                     "Please ensure AWS credentials are configured correctly. "
+                    "When running locally, set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables, "
+                    "or configure ~/.aws/credentials. "
+                    "When running in AWS Lambda/EC2/ECS, ensure the execution role has textract:DetectDocumentText permission. "
                     "See https://boto3.amazonaws.com/v1/documentation/api/latest/guide/credentials.html"
                 ) from e
 

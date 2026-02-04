@@ -144,6 +144,9 @@ class ConversionResultResponse(BaseModel):
     output_format: Optional[str] = Field(
         None, description="The output format used for the 'output' field"
     )
+    confidence: Optional[Dict[str, Any]] = Field(
+        None, description="Confidence scores and grades for the conversion"
+    )
 
 
 @dataclass
@@ -158,6 +161,7 @@ class DoclingConversionResult:
     status: str
     document: Any = None  # Raw Docling document object
     errors: List[Dict[str, str]] = field(default_factory=list)
+    confidence: Optional[Any] = None  # ConfidenceReport from ConversionResult
 
 
 def normalize_bboxes(doc_dict: Dict[str, Any]) -> Dict[str, Any]:
@@ -544,12 +548,25 @@ def convert_files(
             for error in res.errors
         ]
 
+        # Extract confidence report if available
+        confidence_data = None
+        if hasattr(res, "confidence") and res.confidence:
+            try:
+                # Convert ConfidenceReport to dict for serialization
+                if hasattr(res.confidence, "model_dump"):
+                    confidence_data = res.confidence.model_dump(mode="json")
+                elif hasattr(res.confidence, "dict"):
+                    confidence_data = res.confidence.dict()
+            except Exception as e:
+                _log.warning(f"Error extracting confidence for {filename}: {e}")
+
         results.append(
             DoclingConversionResult(
                 filename=filename,
                 status=status_value,
                 document=res.document if status_value == "success" else None,
                 errors=errors,
+                confidence=confidence_data,
             )
         )
 
@@ -630,6 +647,10 @@ def format_conversion_result(
         "status": result.status,
         "errors": [ErrorResponse(**e) for e in result.errors],
     }
+
+    # Include confidence if available
+    if result.confidence:
+        result_data["confidence"] = result.confidence
 
     if result.document and result.status == "success":
         try:

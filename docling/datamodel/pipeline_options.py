@@ -184,18 +184,31 @@ class EasyOcrOptions(OcrOptions):
 
 
 class AwsTextractOcrOptions(OcrOptions):
-    """Options for the AWS Textract OCR engine."""
+    """Options for the AWS Textract OCR engine.
+
+    Authentication is handled automatically through boto3's credential chain:
+
+    1. Explicit credentials (aws_access_key_id + aws_secret_access_key) - if provided
+    2. Environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
+    3. IAM role credentials (Lambda execution role, EC2 instance profile, ECS task role)
+    4. AWS credential file (~/.aws/credentials)
+    5. AWS config file (~/.aws/config)
+
+    When running in AWS Lambda, EC2, or ECS, no explicit credentials are needed -
+    the execution role's permissions are used automatically.
+
+    For local development, either set environment variables or configure ~/.aws/credentials.
+    """
 
     kind: ClassVar[Literal["textract"]] = "textract"
     lang: List[str] = []  # AWS Textract auto-detects language, lang parameter not used
 
-
-
     # AWS credentials - if not provided, boto3 will use default credential chain
+    # (env vars, IAM role, or config files)
     aws_access_key_id: Optional[str] = None
     aws_secret_access_key: Optional[str] = None
     aws_session_token: Optional[str] = None
-    region_name: Optional[str] = None  # e.g., "us-east-1"
+    region_name: Optional[str] = None  # e.g., "us-east-1" (falls back to AWS_REGION env var)
     endpoint_url: Optional[str] = None  # For custom endpoints (e.g., LocalStack)
 
     # OCR processing options
