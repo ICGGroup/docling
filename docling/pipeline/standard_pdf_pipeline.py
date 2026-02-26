@@ -442,66 +442,79 @@ class StandardPdfPipeline(ConvertPipeline):
     # ────────────────────────────────────────────────────────────────────────
 
     def _init_models(self) -> None:
-        art_path = self.artifacts_path
-        self.keep_images = (
-            self.pipeline_options.generate_page_images
-            or self.pipeline_options.generate_picture_images
-            or self.pipeline_options.generate_table_images
-        )
-        self.preprocessing_model = PagePreprocessingModel(
-            options=PagePreprocessingOptions(
-                images_scale=self.pipeline_options.images_scale
-            )
-        )
-        self.ocr_model = self._make_ocr_model(art_path)
-        layout_factory = get_layout_factory(
-            allow_external_plugins=self.pipeline_options.allow_external_plugins
-        )
-        self.layout_model = layout_factory.create_instance(
-            options=self.pipeline_options.layout_options,
-            artifacts_path=art_path,
-            accelerator_options=self.pipeline_options.accelerator_options,
-        )
-        table_factory = get_table_structure_factory(
-            allow_external_plugins=self.pipeline_options.allow_external_plugins
-        )
-        self.table_model = table_factory.create_instance(
-            options=self.pipeline_options.table_structure_options,
-            enabled=self.pipeline_options.do_table_structure,
-            artifacts_path=art_path,
-            accelerator_options=self.pipeline_options.accelerator_options,
-        )
-        self.assemble_model = PageAssembleModel(options=PageAssembleOptions())
-        self.reading_order_model = ReadingOrderModel(options=ReadingOrderOptions())
+        from docling.utils.verbose import vprint, vtimer
 
-        # --- optional enrichment ------------------------------------------------
-        self.enrichment_pipe = [
-            # Code Formula Enrichment Model
-            CodeFormulaModel(
-                enabled=self.pipeline_options.do_code_enrichment
-                or self.pipeline_options.do_formula_enrichment,
-                artifacts_path=self.artifacts_path,
-                options=CodeFormulaModelOptions(
-                    do_code_enrichment=self.pipeline_options.do_code_enrichment,
-                    do_formula_enrichment=self.pipeline_options.do_formula_enrichment,
-                ),
-                accelerator_options=self.pipeline_options.accelerator_options,
-            ),
-            *self.enrichment_pipe,
-        ]
-
-        self.keep_backend = any(
-            (
-                self.pipeline_options.do_formula_enrichment,
-                self.pipeline_options.do_code_enrichment,
-                self.pipeline_options.do_picture_classification,
-                self.pipeline_options.do_picture_description,
+        with vtimer("ThreadedPipeline._init_models"):
+            art_path = self.artifacts_path
+            self.keep_images = (
+                self.pipeline_options.generate_page_images
+                or self.pipeline_options.generate_picture_images
+                or self.pipeline_options.generate_table_images
             )
-        )
+
+            with vtimer("ThreadedPipeline preprocessing_model"):
+                self.preprocessing_model = PagePreprocessingModel(
+                    options=PagePreprocessingOptions(
+                        images_scale=self.pipeline_options.images_scale
+                    )
+                )
+
+            with vtimer("ThreadedPipeline ocr_model"):
+                self.ocr_model = self._make_ocr_model(art_path)
+
+            with vtimer("ThreadedPipeline layout_model"):
+                layout_factory = get_layout_factory(
+                    allow_external_plugins=self.pipeline_options.allow_external_plugins
+                )
+                self.layout_model = layout_factory.create_instance(
+                    options=self.pipeline_options.layout_options,
+                    artifacts_path=art_path,
+                    accelerator_options=self.pipeline_options.accelerator_options,
+                )
+
+            with vtimer("ThreadedPipeline table_model"):
+                table_factory = get_table_structure_factory(
+                    allow_external_plugins=self.pipeline_options.allow_external_plugins
+                )
+                self.table_model = table_factory.create_instance(
+                    options=self.pipeline_options.table_structure_options,
+                    enabled=self.pipeline_options.do_table_structure,
+                    artifacts_path=art_path,
+                    accelerator_options=self.pipeline_options.accelerator_options,
+                )
+
+            with vtimer("ThreadedPipeline assemble+reading_order"):
+                self.assemble_model = PageAssembleModel(options=PageAssembleOptions())
+                self.reading_order_model = ReadingOrderModel(options=ReadingOrderOptions())
+
+            with vtimer("ThreadedPipeline enrichment_pipe"):
+                self.enrichment_pipe = [
+                    CodeFormulaModel(
+                        enabled=self.pipeline_options.do_code_enrichment
+                        or self.pipeline_options.do_formula_enrichment,
+                        artifacts_path=self.artifacts_path,
+                        options=CodeFormulaModelOptions(
+                            do_code_enrichment=self.pipeline_options.do_code_enrichment,
+                            do_formula_enrichment=self.pipeline_options.do_formula_enrichment,
+                        ),
+                        accelerator_options=self.pipeline_options.accelerator_options,
+                    ),
+                    *self.enrichment_pipe,
+                ]
+
+            self.keep_backend = any(
+                (
+                    self.pipeline_options.do_formula_enrichment,
+                    self.pipeline_options.do_code_enrichment,
+                    self.pipeline_options.do_picture_classification,
+                    self.pipeline_options.do_picture_description,
+                )
+            )
 
     # ---------------------------------------------------------------- helpers
     def _make_ocr_model(self, art_path: Optional[Path]) -> Any:
-        print(f"=== _make_ocr_model: do_ocr={self.pipeline_options.do_ocr}, ocr_options={type(self.pipeline_options.ocr_options).__name__} ===")
+        from docling.utils.verbose import vprint
+        vprint(f"=== _make_ocr_model: do_ocr={self.pipeline_options.do_ocr}, ocr_options={type(self.pipeline_options.ocr_options).__name__} ===")
         factory = get_ocr_factory(
             allow_external_plugins=self.pipeline_options.allow_external_plugins
         )

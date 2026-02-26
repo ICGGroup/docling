@@ -13,6 +13,7 @@ from docling.datamodel.document import ConversionResult
 from docling.datamodel.settings import settings
 from docling.models.base_model import BasePageModel
 from docling.utils.profiling import TimeRecorder
+from docling.utils.verbose import vprint
 
 
 class PagePreprocessingOptions(BaseModel):
@@ -37,15 +38,22 @@ class PagePreprocessingModel(BasePageModel):
     def __call__(
         self, conv_res: ConversionResult, page_batch: Iterable[Page]
     ) -> Iterable[Page]:
+        import time as _time
         for page in page_batch:
             assert page._backend is not None
             if not page._backend.is_valid():
                 yield page
             else:
+                _pp_start = _time.time()
                 with TimeRecorder(conv_res, "page_parse"):
                     page = self._populate_page_images(page)
                     if not self.options.skip_cell_extraction:
                         page = self._parse_page_cells(conv_res, page)
+                _pp_ms = (_time.time() - _pp_start) * 1000
+                vprint(
+                    f"=== PagePreprocessing: page={page.page_no}, "
+                    f"cells={len(page.cells)}, {_pp_ms:.1f}ms ==="
+                )
                 yield page
 
     # Generate the page image and store it in the page object

@@ -38,6 +38,7 @@ from docling.models.stages.reading_order.readingorder_model import (
 from docling.pipeline.base_pipeline import PaginatedPipeline
 from docling.utils.model_downloader import download_models
 from docling.utils.profiling import ProfilingScope, TimeRecorder
+from docling.utils.verbose import vprint, vtimer
 
 _log = logging.getLogger(__name__)
 
@@ -47,75 +48,82 @@ class LegacyStandardPdfPipeline(PaginatedPipeline):
         super().__init__(pipeline_options)
         self.pipeline_options: PdfPipelineOptions
 
-        with warnings.catch_warnings():  # deprecated generate_table_images
-            warnings.filterwarnings("ignore", category=DeprecationWarning)
-            self.keep_images = (
-                self.pipeline_options.generate_page_images
-                or self.pipeline_options.generate_picture_images
-                or self.pipeline_options.generate_table_images
-            )
-
-        self.reading_order_model = ReadingOrderModel(options=ReadingOrderOptions())
-
-        ocr_model = self.get_ocr_model(artifacts_path=self.artifacts_path)
-
-        layout_factory = get_layout_factory(
-            allow_external_plugins=self.pipeline_options.allow_external_plugins
-        )
-        layout_model = layout_factory.create_instance(
-            options=pipeline_options.layout_options,
-            artifacts_path=self.artifacts_path,
-            accelerator_options=pipeline_options.accelerator_options,
-        )
-        table_factory = get_table_structure_factory(
-            allow_external_plugins=self.pipeline_options.allow_external_plugins
-        )
-        table_model = table_factory.create_instance(
-            options=pipeline_options.table_structure_options,
-            enabled=pipeline_options.do_table_structure,
-            artifacts_path=self.artifacts_path,
-            accelerator_options=pipeline_options.accelerator_options,
-        )
-
-        self.build_pipe = [
-            # Pre-processing
-            PagePreprocessingModel(
-                options=PagePreprocessingOptions(
-                    images_scale=pipeline_options.images_scale,
+        with vtimer("LegacyPipeline.__init__"):
+            with warnings.catch_warnings():  # deprecated generate_table_images
+                warnings.filterwarnings("ignore", category=DeprecationWarning)
+                self.keep_images = (
+                    self.pipeline_options.generate_page_images
+                    or self.pipeline_options.generate_picture_images
+                    or self.pipeline_options.generate_table_images
                 )
-            ),
-            # OCR
-            ocr_model,
-            # Layout model
-            layout_model,
-            # Table structure model
-            table_model,
-            # Page assemble
-            PageAssembleModel(options=PageAssembleOptions()),
-        ]
 
-        self.enrichment_pipe = [
-            # Code Formula Enrichment Model
-            CodeFormulaModel(
-                enabled=pipeline_options.do_code_enrichment
-                or pipeline_options.do_formula_enrichment,
-                artifacts_path=self.artifacts_path,
-                options=CodeFormulaModelOptions(
-                    do_code_enrichment=pipeline_options.do_code_enrichment,
-                    do_formula_enrichment=pipeline_options.do_formula_enrichment,
+            with vtimer("LegacyPipeline reading_order_model"):
+                self.reading_order_model = ReadingOrderModel(options=ReadingOrderOptions())
+
+            with vtimer("LegacyPipeline ocr_model"):
+                ocr_model = self.get_ocr_model(artifacts_path=self.artifacts_path)
+
+            with vtimer("LegacyPipeline layout_model"):
+                layout_factory = get_layout_factory(
+                    allow_external_plugins=self.pipeline_options.allow_external_plugins
+                )
+                layout_model = layout_factory.create_instance(
+                    options=pipeline_options.layout_options,
+                    artifacts_path=self.artifacts_path,
+                    accelerator_options=pipeline_options.accelerator_options,
+                )
+
+            with vtimer("LegacyPipeline table_model"):
+                table_factory = get_table_structure_factory(
+                    allow_external_plugins=self.pipeline_options.allow_external_plugins
+                )
+                table_model = table_factory.create_instance(
+                    options=pipeline_options.table_structure_options,
+                    enabled=pipeline_options.do_table_structure,
+                    artifacts_path=self.artifacts_path,
+                    accelerator_options=pipeline_options.accelerator_options,
+                )
+
+            self.build_pipe = [
+                # Pre-processing
+                PagePreprocessingModel(
+                    options=PagePreprocessingOptions(
+                        images_scale=pipeline_options.images_scale,
+                    )
                 ),
-                accelerator_options=pipeline_options.accelerator_options,
-            ),
-            *self.enrichment_pipe,
-        ]
+                # OCR
+                ocr_model,
+                # Layout model
+                layout_model,
+                # Table structure model
+                table_model,
+                # Page assemble
+                PageAssembleModel(options=PageAssembleOptions()),
+            ]
 
-        if (
-            self.pipeline_options.do_formula_enrichment
-            or self.pipeline_options.do_code_enrichment
-            or self.pipeline_options.do_picture_classification
-            or self.pipeline_options.do_picture_description
-        ):
-            self.keep_backend = True
+            with vtimer("LegacyPipeline enrichment_pipe"):
+                self.enrichment_pipe = [
+                    # Code Formula Enrichment Model
+                    CodeFormulaModel(
+                        enabled=pipeline_options.do_code_enrichment
+                        or pipeline_options.do_formula_enrichment,
+                        artifacts_path=self.artifacts_path,
+                        options=CodeFormulaModelOptions(
+                            do_code_enrichment=pipeline_options.do_code_enrichment,
+                            do_formula_enrichment=pipeline_options.do_formula_enrichment,
+                        ),
+                        accelerator_options=pipeline_options.accelerator_options,
+                    ),
+                    *self.enrichment_pipe,
+                ]
+
+            if (
+                self.pipeline_options.do_formula_enrichment
+                or self.pipeline_options.do_code_enrichment
+                or self.pipeline_options.do_picture_classification
+                or self.pipeline_options.do_picture_description
+            ):
+                self.keep_backend = True
 
     @staticmethod
     def download_models_hf(
@@ -156,6 +164,7 @@ class LegacyStandardPdfPipeline(PaginatedPipeline):
         all_headers = []
         all_body = []
 
+        vprint("=== _assemble_document: BEGIN ===")
         with TimeRecorder(conv_res, "doc_assemble", scope=ProfilingScope.DOCUMENT):
             for p in conv_res.pages:
                 if p.assembled is not None:
@@ -169,6 +178,7 @@ class LegacyStandardPdfPipeline(PaginatedPipeline):
             conv_res.assembled = AssembledUnit(
                 elements=all_elements, headers=all_headers, body=all_body
             )
+            vprint(f"=== _assemble_document: assembled {len(all_elements)} elements, running reading_order ===")
 
             conv_res.document = self.reading_order_model(conv_res)
 

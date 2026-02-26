@@ -22,6 +22,7 @@ from docling.datamodel.pipeline_options import (
     OcrMacOptions,
     PdfPipelineOptions,
     RapidOcrOptions,
+    TableFormerMode,
     TableStructureOptions,
     TesseractCliOcrOptions,
     TesseractOcrOptions,
@@ -33,7 +34,8 @@ from docling.document_converter import (
     WordFormatOption,
 )
 from docling.pipeline.simple_pipeline import SimplePipeline
-from docling.pipeline.standard_pdf_pipeline import StandardPdfPipeline
+from docling.pipeline.legacy_standard_pdf_pipeline import LegacyStandardPdfPipeline
+from docling.utils.verbose import vprint, vtimer
 from docling_core.types.doc import ImageRefMode
 
 # Configure logging
@@ -114,12 +116,35 @@ class OcrOptionsModel(BaseModel):
     )
 
 
+class PipelineMode(str, Enum):
+    """Pipeline implementation to use for PDF processing."""
+
+    LEGACY = "legacy"  # Sequential pipeline (default, fast cold start)
+    THREADED = "threaded"  # Multi-threaded pipeline (better for large documents)
+
+
 class ConversionOptions(BaseModel):
     """Options for document conversion."""
 
     ocr: Optional[OcrOptionsModel] = Field(
         default=None,
         description="OCR configuration. If not specified, OCR is disabled.",
+    )
+    pipeline: PipelineMode = Field(
+        default=PipelineMode.LEGACY,
+        description="Pipeline mode: 'legacy' (default, fast cold start) or 'threaded' (better for large multi-page documents).",
+    )
+    table_mode: TableFormerMode = Field(
+        default=TableFormerMode.FAST,
+        description="Table structure mode: 'fast' (default, faster) or 'accurate' (slower ML inference, more precise).",
+    )
+    do_table_structure: bool = Field(
+        default=True,
+        description="Enable table structure recognition via TableFormer ML model. When False, skips model loading and inference entirely (saves 3-35s init + 10-40s per table on CPU). Layout model still identifies table regions with concatenated text.",
+    )
+    document_timeout: Optional[float] = Field(
+        default=None,
+        description="Maximum time in seconds for document conversion. When exceeded, returns partial results gracefully. None = no timeout.",
     )
 
 
@@ -423,39 +448,61 @@ def _create_document_converter(options: Optional[ConversionOptions] = None) -> D
 
     # Log the OCR configuration
     if ocr_config:
-        print(f"=== _create_document_converter: do_ocr={do_ocr}, engine={ocr_config.engine.value} ===")
+        vprint(f"=== _create_document_converter: do_ocr={do_ocr}, engine={ocr_config.engine.value} ===")
         _log.info(f"Creating DocumentConverter with do_ocr={do_ocr}, ocr_engine={ocr_config.engine.value}")
     else:
-        print(f"=== _create_document_converter: do_ocr={do_ocr}, ocr_config=None ===")
+        vprint(f"=== _create_document_converter: do_ocr={do_ocr}, ocr_config=None ===")
         _log.info(f"Creating DocumentConverter with do_ocr={do_ocr}, ocr_config=None (no OCR)")
+
+    # Build table structure options
+    table_mode = options.table_mode if options else TableFormerMode.FAST
+    do_table_structure = options.do_table_structure if options else True
+    document_timeout = options.document_timeout if options else None
+    table_options = TableStructureOptions(do_cell_matching=True, mode=table_mode)
+
+    vprint(f"=== Table config: do_table_structure={do_table_structure}, table_mode={table_mode.value}, document_timeout={document_timeout} ===")
+    _log.info(f"Table config: do_table_structure={do_table_structure}, table_mode={table_mode.value}, document_timeout={document_timeout}")
 
     # Create pipeline options
     # IMPORTANT: PdfPipelineOptions defaults to do_ocr=True and ocr_options=OcrAutoOptions()
     # When OCR is disabled, we must explicitly set BOTH do_ocr=False AND ocr_options to
     # prevent the OCR model from being instantiated during pipeline initialization.
+    pipeline_kwargs = {
+        "do_table_structure": do_table_structure,
+        "table_structure_options": table_options,
+    }
+    if document_timeout is not None:
+        pipeline_kwargs["document_timeout"] = document_timeout
+
     if do_ocr and ocr_options:
         # OCR enabled with specific options
-        print(f"=== Creating PdfPipelineOptions with do_ocr=True, ocr_options={type(ocr_options).__name__} ===")
+        vprint(f"=== Creating PdfPipelineOptions with do_ocr=True, ocr_options={type(ocr_options).__name__}, table_mode={table_mode.value}, do_table_structure={do_table_structure} ===")
         pdf_pipeline_options = PdfPipelineOptions(
             do_ocr=True,
             ocr_options=ocr_options,
-            do_table_structure=True,
-            table_structure_options=TableStructureOptions(do_cell_matching=True),
+            **pipeline_kwargs,
         )
         _log.info(f"OCR enabled with options: {type(ocr_options).__name__}")
     else:
         # OCR disabled - explicitly set ocr_options to None to prevent model initialization
-        print("=== Creating PdfPipelineOptions with do_ocr=False ===")
+        vprint(f"=== Creating PdfPipelineOptions with do_ocr=False, table_mode={table_mode.value}, do_table_structure={do_table_structure} ===")
         pdf_pipeline_options = PdfPipelineOptions(
             do_ocr=False,
-            do_table_structure=True,
-            table_structure_options=TableStructureOptions(do_cell_matching=True),
+            **pipeline_kwargs,
         )
         _log.info("OCR disabled (do_ocr=False)")
 
+    # Select pipeline implementation (threaded import is lazy to avoid slowing Lambda init)
+    pipeline_mode = options.pipeline if options else PipelineMode.LEGACY
+    if pipeline_mode == PipelineMode.THREADED:
+        from docling.pipeline.standard_pdf_pipeline import StandardPdfPipeline
+        pipeline_cls = StandardPdfPipeline
+    else:
+        pipeline_cls = LegacyStandardPdfPipeline
+
     # Log the final pipeline options for debugging
-    print(f"=== PdfPipelineOptions created: do_ocr={pdf_pipeline_options.do_ocr} ===")
-    _log.info(f"PdfPipelineOptions: do_ocr={pdf_pipeline_options.do_ocr}, ocr_options type={type(pdf_pipeline_options.ocr_options).__name__}")
+    vprint(f"=== PdfPipelineOptions created: do_ocr={pdf_pipeline_options.do_ocr}, pipeline={pipeline_mode.value} ===")
+    _log.info(f"PdfPipelineOptions: do_ocr={pdf_pipeline_options.do_ocr}, ocr_options type={type(pdf_pipeline_options.ocr_options).__name__}, pipeline={pipeline_mode.value}")
 
     return DocumentConverter(
         allowed_formats=[
@@ -471,11 +518,10 @@ def _create_document_converter(options: Optional[ConversionOptions] = None) -> D
         ],
         format_options={
             InputFormat.PDF: PdfFormatOption(
-                pipeline_cls=StandardPdfPipeline,
+                pipeline_cls=pipeline_cls,
                 backend=PyPdfiumDocumentBackend,
                 pipeline_options=pdf_pipeline_options,
             ),
-            # IMAGE format also uses StandardPdfPipeline, so it needs the same OCR options
             InputFormat.IMAGE: ImageFormatOption(
                 pipeline_options=pdf_pipeline_options,
             ),
@@ -504,73 +550,74 @@ def convert_files(
         return []
 
     # Log the conversion options for debugging
-    if options and options.ocr:
-        print(f"=== convert_files: OCR engine = {options.ocr.engine.value} ===")
-        _log.info(f"convert_files called with OCR engine: {options.ocr.engine.value}")
+    if options:
+        ocr_desc = f"OCR engine={options.ocr.engine.value}" if options.ocr else "OCR disabled"
+        vprint(f"=== convert_files: {ocr_desc}, do_table_structure={options.do_table_structure}, table_mode={options.table_mode.value}, document_timeout={options.document_timeout} ===")
+        _log.info(f"convert_files called with {ocr_desc}, do_table_structure={options.do_table_structure}, table_mode={options.table_mode.value}, document_timeout={options.document_timeout}")
     else:
-        print("=== convert_files: OCR is DISABLED ===")
-        _log.info("convert_files called with OCR disabled (no OCR options specified)")
+        vprint("=== convert_files: no options (defaults) ===")
+        _log.info("convert_files called with no options (using defaults)")
 
     # Initialize DocumentConverter with options
-    print("=== Creating DocumentConverter... ===")
-    doc_converter = _create_document_converter(options)
-    print("=== DocumentConverter created ===")
+    with vtimer("DocumentConverter.__init__"):
+        doc_converter = _create_document_converter(options)
 
-    # Convert all files
+    # Convert all files (convert_all returns an iterator — real work happens during iteration)
     results = []
-    conv_results = doc_converter.convert_all(file_paths)
+    with vtimer(f"doc_converter.convert_all ({len(file_paths)} file(s))"):
+        conv_results = doc_converter.convert_all(file_paths)
 
-    for res in conv_results:
-        # Extract filename from input
-        filename = "unknown"
-        if hasattr(res.input, "file") and res.input.file:
-            # file is a PurePath, so we can get the name
-            filename = (
-                str(res.input.file.name) if res.input.file.name else str(res.input.file)
+        for res in conv_results:
+            # Extract filename from input
+            filename = "unknown"
+            if hasattr(res.input, "file") and res.input.file:
+                # file is a PurePath, so we can get the name
+                filename = (
+                    str(res.input.file.name) if res.input.file.name else str(res.input.file)
+                )
+
+            # Extract relevant information from ConversionResult
+            status_value = (
+                res.status.value if hasattr(res.status, "value") else str(res.status)
             )
 
-        # Extract relevant information from ConversionResult
-        status_value = (
-            res.status.value if hasattr(res.status, "value") else str(res.status)
-        )
+            # Build errors list
+            errors = [
+                {
+                    "component_type": (
+                        error.component_type.value
+                        if hasattr(error.component_type, "value")
+                        else str(error.component_type)
+                    ),
+                    "module_name": error.module_name,
+                    "error_message": error.error_message,
+                }
+                for error in res.errors
+            ]
 
-        # Build errors list
-        errors = [
-            {
-                "component_type": (
-                    error.component_type.value
-                    if hasattr(error.component_type, "value")
-                    else str(error.component_type)
-                ),
-                "module_name": error.module_name,
-                "error_message": error.error_message,
-            }
-            for error in res.errors
-        ]
+            # Extract confidence report if available
+            confidence_data = None
+            if hasattr(res, "confidence") and res.confidence:
+                try:
+                    # Convert ConfidenceReport to dict for serialization
+                    if hasattr(res.confidence, "model_dump"):
+                        confidence_data = res.confidence.model_dump(mode="json")
+                    elif hasattr(res.confidence, "dict"):
+                        confidence_data = res.confidence.dict()
+                except Exception as e:
+                    _log.warning(f"Error extracting confidence for {filename}: {e}")
 
-        # Extract confidence report if available
-        confidence_data = None
-        if hasattr(res, "confidence") and res.confidence:
-            try:
-                # Convert ConfidenceReport to dict for serialization
-                if hasattr(res.confidence, "model_dump"):
-                    confidence_data = res.confidence.model_dump(mode="json")
-                elif hasattr(res.confidence, "dict"):
-                    confidence_data = res.confidence.dict()
-            except Exception as e:
-                _log.warning(f"Error extracting confidence for {filename}: {e}")
-
-        results.append(
-            DoclingConversionResult(
-                filename=filename,
-                status=status_value,
-                document=res.document if status_value == "success" else None,
-                errors=errors,
-                confidence=confidence_data,
+            results.append(
+                DoclingConversionResult(
+                    filename=filename,
+                    status=status_value,
+                    document=res.document if status_value == "success" else None,
+                    errors=errors,
+                    confidence=confidence_data,
+                )
             )
-        )
 
-        _log.info(f"Converted document {filename} with status: {status_value}")
+            vprint(f"=== convert_files: {filename} status={status_value} ===")
 
     return results
 

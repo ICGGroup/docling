@@ -19,6 +19,7 @@ from docling.datamodel.pipeline_options import (
 from docling.datamodel.settings import settings
 from docling.models.base_ocr_model import BaseOcrModel
 from docling.utils.profiling import TimeRecorder
+from docling.utils.verbose import VERBOSE, vprint
 
 _log = logging.getLogger(__name__)
 
@@ -182,15 +183,30 @@ class AwsTextractOcrModel(BaseOcrModel):
             yield from page_batch
             return
 
+        batch_start = time.time()
+        batch_pages = 0
+        batch_rects = 0
+        batch_cells = 0
+        batch_textract_ms = 0.0
+        vprint("=== AWS Textract OCR: BEGIN batch processing ===")
+
         for page in page_batch:
             assert page._backend is not None
             if not page._backend.is_valid():
                 yield page
             else:
+                page_start = time.time()
+                page_size = page.size
+                vprint(
+                    f"=== AWS Textract OCR: BEGIN page={page.page_no}, "
+                    f"page_size={page_size.width:.0f}x{page_size.height:.0f} ==="
+                )
+
                 with TimeRecorder(conv_res, "ocr"):
                     ocr_rects = self.get_ocr_rects(page)
 
                     all_ocr_cells = []
+                    page_rect_count = 0
                     for ocr_rect in ocr_rects:
                         # Skip zero area boxes
                         if ocr_rect.area() == 0:
@@ -218,6 +234,7 @@ class AwsTextractOcrModel(BaseOcrModel):
                                 Document={"Bytes": image_bytes}
                             )
                             elapsed_ms = (time.time() - start_time) * 1000
+                            batch_textract_ms += elapsed_ms
 
                             # Extract response metadata
                             response_metadata = response.get("ResponseMetadata", {})
@@ -255,6 +272,7 @@ class AwsTextractOcrModel(BaseOcrModel):
                                     )
 
                             all_ocr_cells.extend(cells)
+                            page_rect_count += 1
 
                         except Exception as e:
                             _log.warning(
@@ -268,11 +286,29 @@ class AwsTextractOcrModel(BaseOcrModel):
                     # Post-process the cells
                     self.post_process_cells(all_ocr_cells, page)
 
+                page_elapsed_ms = (time.time() - page_start) * 1000
+                batch_pages += 1
+                batch_rects += page_rect_count
+                batch_cells += len(all_ocr_cells)
+                vprint(
+                    f"=== AWS Textract OCR: END page={page.page_no}, "
+                    f"rects={page_rect_count}, cells={len(all_ocr_cells)}, "
+                    f"page_elapsed={page_elapsed_ms:.1f}ms ==="
+                )
+
                 # DEBUG code:
                 if settings.debug.visualize_ocr:
                     self.draw_ocr_rects_and_cells(conv_res, page, ocr_rects)
 
                 yield page
+
+        batch_elapsed_ms = (time.time() - batch_start) * 1000
+        vprint(
+            f"=== AWS Textract OCR: END batch, pages={batch_pages}, "
+            f"total_rects={batch_rects}, total_cells={batch_cells}, "
+            f"textract_api_time={batch_textract_ms:.1f}ms, "
+            f"batch_elapsed={batch_elapsed_ms:.1f}ms ==="
+        )
 
     @classmethod
     def get_options_type(cls) -> Type[OcrOptions]:

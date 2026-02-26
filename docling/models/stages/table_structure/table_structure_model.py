@@ -1,4 +1,6 @@
 import copy
+import logging
+import time
 import warnings
 from collections.abc import Iterable, Sequence
 from pathlib import Path
@@ -24,6 +26,9 @@ from docling.models.base_table_model import BaseTableStructureModel
 from docling.models.utils.hf_model_download import download_hf_model
 from docling.utils.accelerator_utils import decide_device
 from docling.utils.profiling import TimeRecorder
+from docling.utils.verbose import VERBOSE, vprint
+
+_log = logging.getLogger(__name__)
 
 
 class TableStructureModel(BaseTableStructureModel):
@@ -179,6 +184,14 @@ class TableStructureModel(BaseTableStructureModel):
         pages = list(pages)
         predictions: list[TableStructurePrediction] = []
 
+        batch_start = time.time()
+        batch_tables = 0
+        batch_predict_ms = 0.0
+        vprint(
+            f"=== TableStructure: BEGIN batch, pages={len(pages)}, "
+            f"mode={self.mode.value}, cell_matching={self.do_cell_matching} ==="
+        )
+
         for page in pages:
             assert page._backend is not None
             if not page._backend.is_valid():
@@ -188,6 +201,8 @@ class TableStructureModel(BaseTableStructureModel):
                 page.predictions.tablestructure = existing_prediction
                 predictions.append(existing_prediction)
                 continue
+
+            page_start = time.time()
 
             with TimeRecorder(conv_res, "table_structure"):
                 assert page.predictions.layout is not None
@@ -211,8 +226,17 @@ class TableStructureModel(BaseTableStructureModel):
                     in [DocItemLabel.TABLE, DocItemLabel.DOCUMENT_INDEX]
                 ]
                 if not in_tables:
+                    _log.info(
+                        f"TableStructure: page={page.page_no}, no tables detected by layout"
+                    )
                     predictions.append(table_prediction)
                     continue
+
+                vprint(
+                    f"=== TableStructure: BEGIN page={page.page_no}, "
+                    f"tables={len(in_tables)}, "
+                    f"page_size={page.size.width:.0f}x{page.size.height:.0f} ==="
+                )
 
                 page_input = {
                     "width": page.size.width * self.scale,
@@ -220,7 +244,8 @@ class TableStructureModel(BaseTableStructureModel):
                     "image": numpy.asarray(page.get_image(scale=self.scale)),
                 }
 
-                for table_cluster, tbl_box in in_tables:
+                page_predict_ms = 0.0
+                for tbl_idx, (table_cluster, tbl_box) in enumerate(in_tables):
                     # Check if word-level cells are available from backend:
                     sp = page._backend.get_segmented_page()
                     if sp is not None:
@@ -251,9 +276,14 @@ class TableStructureModel(BaseTableStructureModel):
                             )
                     page_input["tokens"] = tokens
 
+                    predict_start = time.time()
                     tf_output = self.tf_predictor.multi_table_predict(
                         page_input, [tbl_box], do_matching=self.do_cell_matching
                     )
+                    predict_elapsed = (time.time() - predict_start) * 1000
+                    page_predict_ms += predict_elapsed
+                    batch_predict_ms += predict_elapsed
+
                     table_out = tf_output[0]
                     table_cells = []
                     for element in table_out["tf_responses"]:
@@ -292,6 +322,16 @@ class TableStructureModel(BaseTableStructureModel):
                     )
 
                     table_prediction.table_map[table_cluster.id] = tbl
+                    batch_tables += 1
+
+                    _log.info(
+                        f"TableStructure: page={page.page_no}, "
+                        f"table {tbl_idx + 1}/{len(in_tables)}, "
+                        f"tokens={len(tokens)}, "
+                        f"rows={num_rows}, cols={num_cols}, "
+                        f"cells={len(table_cells)}, "
+                        f"predict={predict_elapsed:.1f}ms"
+                    )
 
                 if settings.debug.visualize_tables:
                     self.draw_table_and_cells(
@@ -301,5 +341,21 @@ class TableStructureModel(BaseTableStructureModel):
                     )
 
                 predictions.append(table_prediction)
+
+            page_elapsed_ms = (time.time() - page_start) * 1000
+            vprint(
+                f"=== TableStructure: END page={page.page_no}, "
+                f"tables={len(in_tables)}, "
+                f"predict_time={page_predict_ms:.1f}ms, "
+                f"page_elapsed={page_elapsed_ms:.1f}ms ==="
+            )
+
+        batch_elapsed_ms = (time.time() - batch_start) * 1000
+        vprint(
+            f"=== TableStructure: END batch, pages={len(pages)}, "
+            f"total_tables={batch_tables}, "
+            f"model_predict_time={batch_predict_ms:.1f}ms, "
+            f"batch_elapsed={batch_elapsed_ms:.1f}ms ==="
+        )
 
         return predictions

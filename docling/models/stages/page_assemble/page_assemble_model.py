@@ -19,6 +19,7 @@ from docling.datamodel.document import ConversionResult
 from docling.models.base_model import BasePageModel
 from docling.models.stages.layout.layout_model import LayoutModel
 from docling.utils.profiling import TimeRecorder
+from docling.utils.verbose import vprint
 
 _log = logging.getLogger(__name__)
 
@@ -151,6 +152,10 @@ class PageAssembleModel(BasePageModel):
 
                     page.assembled = AssembledUnit(
                         elements=elements, headers=headers, body=body
+                    )
+                    vprint(
+                        f"=== PageAssemble: page={page.page_no}, "
+                        f"elements={len(elements)} ==="
                     )
 
                 yield page

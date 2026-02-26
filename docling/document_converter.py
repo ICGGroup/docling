@@ -63,7 +63,7 @@ from docling.exceptions import ConversionError
 from docling.pipeline.asr_pipeline import AsrPipeline
 from docling.pipeline.base_pipeline import BasePipeline
 from docling.pipeline.simple_pipeline import SimplePipeline
-from docling.pipeline.standard_pdf_pipeline import StandardPdfPipeline
+from docling.pipeline.legacy_standard_pdf_pipeline import LegacyStandardPdfPipeline
 from docling.utils.utils import chunkify
 
 _log = logging.getLogger(__name__)
@@ -130,12 +130,12 @@ class XMLJatsFormatOption(FormatOption):
 
 
 class ImageFormatOption(FormatOption):
-    pipeline_cls: Type = StandardPdfPipeline
+    pipeline_cls: Type = LegacyStandardPdfPipeline
     backend: Type[AbstractDocumentBackend] = ImageDocumentBackend
 
 
 class PdfFormatOption(FormatOption):
-    pipeline_cls: Type = StandardPdfPipeline
+    pipeline_cls: Type = LegacyStandardPdfPipeline
     backend: Type[AbstractDocumentBackend] = DoclingParseV4DocumentBackend
     backend_options: Optional[PdfBackendOptions] = None
 
@@ -157,7 +157,7 @@ def _get_default_option(format: InputFormat) -> FormatOption:
         InputFormat.XML_USPTO: PatentUsptoFormatOption(),
         InputFormat.XML_JATS: XMLJatsFormatOption(),
         InputFormat.METS_GBS: FormatOption(
-            pipeline_cls=StandardPdfPipeline, backend=MetsGbsDocumentBackend
+            pipeline_cls=LegacyStandardPdfPipeline, backend=MetsGbsDocumentBackend
         ),
         InputFormat.IMAGE: ImageFormatOption(),
         InputFormat.PDF: PdfFormatOption(),

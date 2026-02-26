@@ -36,6 +36,7 @@ from docling.models.stages.picture_classifier.document_picture_classifier import
 )
 from docling.utils.profiling import ProfilingScope, TimeRecorder
 from docling.utils.utils import chunkify
+from docling.utils.verbose import vprint
 
 _log = logging.getLogger(__name__)
 
@@ -62,7 +63,7 @@ class BasePipeline(ABC):
     def execute(self, in_doc: InputDocument, raises_on_error: bool) -> ConversionResult:
         conv_res = ConversionResult(input=in_doc)
 
-        _log.info(f"Processing document {in_doc.file.name}")
+        vprint(f"=== Pipeline.execute: BEGIN {in_doc.file.name}, pipeline={self.__class__.__name__} ===")
         try:
             with TimeRecorder(
                 conv_res, "pipeline_total", scope=ProfilingScope.DOCUMENT
@@ -218,13 +219,26 @@ class PaginatedPipeline(ConvertPipeline):  # TODO this is a bad name.
                 if (start_page - 1) <= i <= (end_page - 1):
                     conv_res.pages.append(Page(page_no=i))
 
+            vprint(
+                f"=== _build_document: {len(conv_res.pages)} page(s), "
+                f"batch_size={settings.perf.page_batch_size} ==="
+            )
+
             try:
                 total_pages_processed = 0
+                batch_num = 0
                 # Iterate batches of pages (page_batch_size) in the doc
                 for page_batch in chunkify(
                     conv_res.pages, settings.perf.page_batch_size
                 ):
+                    batch_num += 1
                     start_batch_time = time.monotonic()
+                    vprint(
+                        f"=== page batch {batch_num}: BEGIN "
+                        f"pages {total_pages_processed + 1}-"
+                        f"{total_pages_processed + len(page_batch)}"
+                        f"/{len(conv_res.pages)} ==="
+                    )
 
                     # 1. Initialise the page resources
                     init_pages = map(
@@ -250,7 +264,15 @@ class PaginatedPipeline(ConvertPipeline):  # TODO this is a bad name.
                             p.parsed_page = None
 
                     end_batch_time = time.monotonic()
-                    total_elapsed_time += end_batch_time - start_batch_time
+                    batch_elapsed = end_batch_time - start_batch_time
+                    total_elapsed_time += batch_elapsed
+                    total_pages_processed += len(page_batch)
+                    vprint(
+                        f"=== page batch {batch_num}: END "
+                        f"{total_pages_processed}/{len(conv_res.pages)} pages, "
+                        f"batch={batch_elapsed * 1000:.1f}ms, "
+                        f"cumulative={total_elapsed_time * 1000:.1f}ms ==="
+                    )
                     if (
                         self.pipeline_options.document_timeout is not None
                         and total_elapsed_time > self.pipeline_options.document_timeout
@@ -260,10 +282,6 @@ class PaginatedPipeline(ConvertPipeline):  # TODO this is a bad name.
                         )
                         conv_res.status = ConversionStatus.PARTIAL_SUCCESS
                         break
-                    total_pages_processed += len(page_batch)
-                    _log.debug(
-                        f"Finished converting pages {total_pages_processed}/{len(conv_res.pages)} time={end_batch_time:.3f}"
-                    )
 
             except Exception as e:
                 conv_res.status = ConversionStatus.FAILURE

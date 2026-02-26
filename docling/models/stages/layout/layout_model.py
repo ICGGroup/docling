@@ -20,6 +20,7 @@ from docling.models.utils.hf_model_download import download_hf_model
 from docling.utils.accelerator_utils import decide_device
 from docling.utils.layout_postprocessor import LayoutPostprocessor
 from docling.utils.profiling import TimeRecorder
+from docling.utils.verbose import vprint
 from docling.utils.visualization import draw_clusters
 
 _log = logging.getLogger(__name__)
@@ -176,10 +177,15 @@ class LayoutModel(BaseLayoutModel):
         # Process all valid pages with batch prediction
         batch_predictions = []
         if valid_page_images:
+            import time as _time
+            vprint(f"=== LayoutModel.predict_batch: BEGIN {len(valid_page_images)} page(s) ===")
+            _layout_start = _time.time()
             with TimeRecorder(conv_res, "layout"):
                 batch_predictions = self.layout_predictor.predict_batch(  # type: ignore[attr-defined]
                     valid_page_images
                 )
+            _layout_ms = (_time.time() - _layout_start) * 1000
+            vprint(f"=== LayoutModel.predict_batch: END {len(valid_page_images)} page(s), {_layout_ms:.1f}ms ===")
 
         # Process each page with its predictions
         layout_predictions: list[LayoutPrediction] = []

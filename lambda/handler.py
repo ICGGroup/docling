@@ -33,6 +33,7 @@ from rest.common import (
     normalize_bboxes,
     parse_output_format,
 )
+from docling.utils.verbose import vprint, vtimer
 
 # Configure logging - set to DEBUG for detailed output
 logging.basicConfig(
@@ -44,7 +45,7 @@ _log = logging.getLogger(__name__)
 # Also configure the rest.common logger
 logging.getLogger('rest.common').setLevel(logging.DEBUG)
 
-print("=== Lambda handler module loaded ===")
+vprint("=== Lambda handler module loaded ===")
 
 # File extension mapping for output formats
 FORMAT_EXTENSIONS = {
@@ -271,7 +272,7 @@ def _parse_request(
     _log.info(f"Parsing options: {options_dict}")
     try:
         conversion_options = ConversionOptions(**options_dict)
-        _log.info(f"ConversionOptions created: ocr={conversion_options.ocr}")
+        _log.info(f"ConversionOptions created: ocr={conversion_options.ocr}, table_mode={conversion_options.table_mode.value}, do_table_structure={conversion_options.do_table_structure}, document_timeout={conversion_options.document_timeout}")
         if conversion_options.ocr:
             _log.info(f"OCR config: engine={conversion_options.ocr.engine.value}, force_full_page={conversion_options.ocr.force_full_page_ocr}")
     except Exception as e:
@@ -450,7 +451,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     Returns:
         Lambda response dictionary with statusCode, headers, and body
     """
-    print("=== Lambda handler function called ===")
+    vprint("=== Lambda handler function called ===")
     _log.info(f"Lambda handler invoked with event keys: {list(event.keys())}")
 
     try:
@@ -458,11 +459,11 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         files, output_format, additional_formats, conversion_options, force_conversion = _parse_request(event)
 
         # Log OCR configuration explicitly
-        print(f"=== OCR Config: {conversion_options.ocr} ===")
+        vprint(f"=== OCR Config: {conversion_options.ocr} ===")
         if conversion_options.ocr:
-            print(f"=== OCR Engine: {conversion_options.ocr.engine.value} ===")
+            vprint(f"=== OCR Engine: {conversion_options.ocr.engine.value} ===")
         else:
-            print("=== OCR is DISABLED (no OCR options specified) ===")
+            vprint("=== OCR is DISABLED (no OCR options specified) ===")
 
         _log.info(
             f"Processing {len(files)} file(s) with output_format={output_format.value}, "
@@ -499,9 +500,10 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             key = file_entry["key"]
             s3_client = get_s3_client(region)
 
-            all_exist, primary_content, existing_files = _check_existing_artifacts(
-                s3_client, bucket, key, output_format, additional_formats
-            )
+            with vtimer("S3 cache check"):
+                all_exist, primary_content, existing_files = _check_existing_artifacts(
+                    s3_client, bucket, key, output_format, additional_formats
+                )
 
             if all_exist and primary_content is not None:
                 _log.info(f"Using cached artifacts for {bucket}/{key}")
@@ -541,52 +543,57 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             temp_path = Path(temp_dir)
             file_paths = []
 
-            for file_entry in files:
-                region = file_entry.get("region", default_region)
-                bucket = file_entry["bucket"]
-                key = file_entry["key"]
+            with vtimer(f"S3 download ({len(files)} file(s))"):
+                for file_entry in files:
+                    region = file_entry.get("region", default_region)
+                    bucket = file_entry["bucket"]
+                    key = file_entry["key"]
 
-                s3_client = get_s3_client(region)
-                local_path = _download_s3_file(
-                    s3_client, region, bucket, key, temp_path
-                )
-                file_paths.append(local_path)
-                file_metadata.append({
-                    "region": region,
-                    "bucket": bucket,
-                    "key": key,
-                })
+                    s3_client = get_s3_client(region)
+                    local_path = _download_s3_file(
+                        s3_client, region, bucket, key, temp_path
+                    )
+                    file_paths.append(local_path)
+                    file_metadata.append({
+                        "region": region,
+                        "bucket": bucket,
+                        "key": key,
+                    })
 
             if not file_paths:
                 raise LambdaError("No valid files to convert")
 
             # Convert files using common module (returns raw Docling results)
-            raw_results = convert_files(file_paths, conversion_options)
+            with vtimer(f"convert_files ({len(file_paths)} file(s))"):
+                raw_results = convert_files(file_paths, conversion_options)
 
             # Process each converted document and save additional formats
             # Also save the primary format to S3
             all_formats_to_save = [output_format] + [f for f in additional_formats if f != output_format]
 
-            for i, result in enumerate(raw_results):
-                if i < len(file_metadata):
-                    metadata = file_metadata[i]
-                    s3_client = get_s3_client(metadata["region"])
-                    saved_files = _process_converted_document(
-                        result,
-                        s3_client,
-                        metadata["bucket"],
-                        metadata["key"],
-                        all_formats_to_save,
-                    )
-                    if saved_files:
-                        saved_files_map[result.filename] = saved_files
+            with vtimer(f"S3 upload ({len(all_formats_to_save)} format(s))"):
+                for i, result in enumerate(raw_results):
+                    if i < len(file_metadata):
+                        metadata = file_metadata[i]
+                        s3_client = get_s3_client(metadata["region"])
+                        saved_files = _process_converted_document(
+                            result,
+                            s3_client,
+                            metadata["bucket"],
+                            metadata["key"],
+                            all_formats_to_save,
+                        )
+                        if saved_files:
+                            saved_files_map[result.filename] = saved_files
 
             # Format results for output response
-            results = [
-                format_conversion_result(r, output_format) for r in raw_results
-            ]
+            with vtimer("format results"):
+                results = [
+                    format_conversion_result(r, output_format) for r in raw_results
+                ]
 
         # Build response
+        vprint("=== Lambda handler: all phases complete, building response ===")
         return _build_response(results, output_format, saved_files_map)
 
     except LambdaError as e:
